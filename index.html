@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Interactive Photoelasticity + MediaPipe Hands</title>
+<title>Interactive Photoelasticity — Fingertip Pressure</title>
 <style>
 :root{
-  --bg:#0b0d12;
-  --panel:rgba(18,22,30,.78);
+  --bg:#07090d;
+  --panel:rgba(16,20,27,.78);
   --line:rgba(255,255,255,.18);
   --text:#f5f7fb;
   --muted:#aab2c0;
@@ -19,13 +19,13 @@ body{min-height:100vh;overflow:hidden}
 .app{position:relative;width:100vw;height:100vh;background:#05070a}
 video{
   position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
-  transform:scaleX(-1);filter:brightness(.45) saturate(.7) blur(1px);
+  transform:scaleX(-1);filter:brightness(.42) saturate(.72) blur(1px);
 }
 canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
 #sim{z-index:2}
 #hud{z-index:3;pointer-events:none}
 .panel{
-  position:absolute;z-index:5;left:16px;top:16px;width:min(360px,calc(100vw - 32px));
+  position:absolute;z-index:5;left:16px;top:16px;width:min(370px,calc(100vw - 32px));
   background:var(--panel);border:1px solid var(--line);border-radius:16px;
   padding:14px;backdrop-filter:blur(14px);
 }
@@ -43,10 +43,10 @@ button:disabled{opacity:.55;cursor:not-allowed}
 .status{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
 .status strong{color:var(--text)}
 .legend{
-  position:absolute;z-index:5;right:16px;bottom:16px;max-width:320px;
+  position:absolute;z-index:5;right:16px;bottom:16px;max-width:345px;
   background:var(--panel);border:1px solid var(--line);border-radius:14px;
   padding:10px 12px;backdrop-filter:blur(12px);font-size:12px;color:var(--muted);
-  line-height:1.5
+  line-height:1.55
 }
 .badge{display:inline-block;padding:2px 7px;border:1px solid var(--line);border-radius:999px;color:var(--text)}
 @media (max-width:640px){
@@ -82,12 +82,17 @@ button:disabled{opacity:.55;cursor:not-allowed}
 
     <div class="rangeWrap">
       <label for="gain">光弾性感度</label>
-      <input id="gain" type="range" min="1" max="14" value="7" step="0.1">
+      <input id="gain" type="range" min="1" max="14" value="7.5" step="0.1">
     </div>
 
     <div class="rangeWrap">
-      <label for="deform">変形量</label>
-      <input id="deform" type="range" min="0" max="1.4" value="0.75" step="0.01">
+      <label for="pressureGain">指先圧力</label>
+      <input id="pressureGain" type="range" min="0.4" max="3" value="1.4" step="0.05">
+    </div>
+
+    <div class="rangeWrap">
+      <label for="relax">残留時間</label>
+      <input id="relax" type="range" min="0.80" max="0.985" value="0.93" step="0.005">
     </div>
 
     <div class="row" style="margin-top:10px">
@@ -96,15 +101,15 @@ button:disabled{opacity:.55;cursor:not-allowed}
     </div>
 
     <div id="status" class="status">
-      <strong>操作:</strong> 両手で親指＋人差し指をピンチすると2点でつかみます。<br>
-      2点間を広げると引張、狭めると圧縮として扱います。
+      <strong>操作:</strong> 指先を透明体へ触れさせてください。<br>
+      指先の接触位置に局所的な圧力が生じ、光弾性縞が変化します。
     </div>
   </div>
 
   <div class="legend">
-    <span class="badge">両手ピンチ</span> つかむ／変形　
-    <span class="badge">ドラッグ</span> マウス操作<br>
-    MediaPipe Hands 21ランドマークを使用。HTTPS / localhost で実行してください。
+    <span class="badge">指先</span> 接触位置＝荷重点　
+    <span class="badge">圧力</span> 内側への侵入量＋速度<br>
+    人差し指・中指・薬指・小指・親指の5指に対応。
   </div>
 </div>
 
@@ -121,154 +126,111 @@ button:disabled{opacity:.55;cursor:not-allowed}
   const shapeSel = document.getElementById('shape');
   const modeSel = document.getElementById('mode');
   const gainEl = document.getElementById('gain');
-  const deformEl = document.getElementById('deform');
+  const pressureGainEl = document.getElementById('pressureGain');
+  const relaxEl = document.getElementById('relax');
   const startCamBtn = document.getElementById('startCam');
   const resetBtn = document.getElementById('reset');
   const statusEl = document.getElementById('status');
 
-  let W = 0, H = 0, DPR = 1;
-  let camera = null;
-  let handsReady = false;
+  let W=0,H=0,DPR=1;
+  let camera=null,handsReady=false;
+  let activeLoads=[];
+  let persistentLoads=[];
 
-  const pointer = {x:0,y:0,px:0,py:0,down:false,force:0.6};
-  let mouseLoad = null;
+  const TIP_IDS=[4,8,12,16,20];
+  const TIP_NAMES=['親指','人差し指','中指','薬指','小指'];
 
-  const handState = [
-    {visible:false,pinch:false,x:0,y:0,rawX:0,rawY:0,label:'',score:0},
-    {visible:false,pinch:false,x:0,y:0,rawX:0,rawY:0,label:'',score:0}
-  ];
+  const fingertipState = Array.from({length:10},(_,i)=>({
+    visible:false, x:0,y:0, px:0,py:0, pressure:0,
+    hand:Math.floor(i/5), finger:i%5
+  }));
 
-  let grabBaseline = null;
-  let grabMidBaseline = null;
-  let grabVectorBaseline = null;
-  let grabStrength = 0;
-  let grabMode = 'none'; // tension / compression
-  let currentDistance = 0;
-  let baseDistance = 0;
-
-  const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
-  const lerp = (a,b,t)=>a+(b-a)*t;
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const lerp=(a,b,t)=>a+(b-a)*t;
 
   function resize(){
-    DPR = Math.min(window.devicePixelRatio || 1, 2);
-    W = window.innerWidth;
-    H = window.innerHeight;
+    DPR=Math.min(window.devicePixelRatio||1,2);
+    W=window.innerWidth; H=window.innerHeight;
     for(const c of [sim,hud]){
-      c.width = Math.round(W*DPR);
-      c.height = Math.round(H*DPR);
-      c.style.width = W+'px';
-      c.style.height = H+'px';
+      c.width=Math.round(W*DPR);
+      c.height=Math.round(H*DPR);
+      c.style.width=W+'px'; c.style.height=H+'px';
       c.getContext('2d').setTransform(DPR,0,0,DPR,0,0);
     }
   }
 
   function specimenBounds(){
-    const sw = Math.min(W*0.62, 720);
-    const sh = Math.min(H*0.48, 420);
-    return {cx:W/2, cy:H/2+20, sw, sh};
+    const sw=Math.min(W*.62,720);
+    const sh=Math.min(H*.48,420);
+    return {cx:W/2,cy:H/2+20,sw,sh};
   }
 
   function baseInside(x,y){
     const {cx,cy,sw,sh}=specimenBounds();
     const nx=(x-cx)/(sw/2), ny=(y-cy)/(sh/2);
-    if(shapeSel.value==='disk') return nx*nx + ny*ny <= 1;
+    if(shapeSel.value==='disk') return nx*nx+ny*ny<=1;
     if(shapeSel.value==='hole'){
-      const outer=Math.abs(nx)<=1 && Math.abs(ny)<=1;
-      const R=Math.min(sw,sh)*0.18;
+      const outer=Math.abs(nx)<=1&&Math.abs(ny)<=1;
+      const R=Math.min(sw,sh)*.18;
       const hole=((x-cx)**2+(y-cy)**2)<R*R;
-      return outer && !hole;
+      return outer&&!hole;
     }
-    return Math.abs(nx)<=1 && Math.abs(ny)<=1;
+    return Math.abs(nx)<=1&&Math.abs(ny)<=1;
   }
 
-  function deformationData(){
-    if(!(handState[0].pinch && handState[1].pinch) || !grabBaseline){
-      return {active:false, stretch:0, mid:{x:W/2,y:H/2}, angle:0, scaleX:1, scaleY:1};
+  function signedInteriorDepth(x,y){
+    const {cx,cy,sw,sh}=specimenBounds();
+    if(shapeSel.value==='disk'){
+      const R=Math.min(sw,sh)/2;
+      return R-Math.hypot(x-cx,y-cy);
     }
-    const a=handState[0], b=handState[1];
-    const dx=b.x-a.x, dy=b.y-a.y;
-    const dist=Math.hypot(dx,dy);
-    const stretch=(dist-baseDistance)/Math.max(baseDistance,1);
-    const mid={x:(a.x+b.x)/2,y:(a.y+b.y)/2};
-    const angle=Math.atan2(dy,dx);
-    const amt=+deformEl.value;
-    const sx=clamp(1+stretch*amt*1.4,0.55,1.65);
-    const sy=clamp(1-stretch*amt*0.45,0.72,1.28);
-    return {active:true, stretch, mid, angle, scaleX:sx, scaleY:sy};
-  }
-
-  function inverseDeformPoint(x,y,d){
-    if(!d.active) return {x,y};
-    const {cx,cy}=specimenBounds();
-    const ox=x-cx, oy=y-cy;
-    const ca=Math.cos(-d.angle), sa=Math.sin(-d.angle);
-    const rx=ox*ca-oy*sa;
-    const ry=ox*sa+oy*ca;
-    const ux=rx/d.scaleX;
-    const uy=ry/d.scaleY;
-    const cb=Math.cos(d.angle), sb=Math.sin(d.angle);
-    return {x:ux*cb-uy*sb+cx, y:ux*sb+uy*cb+cy};
-  }
-
-  function insideDeformed(x,y,d){
-    const p=inverseDeformPoint(x,y,d);
-    return baseInside(p.x,p.y);
+    if(shapeSel.value==='hole'){
+      const left=x-(cx-sw/2), right=(cx+sw/2)-x;
+      const top=y-(cy-sh/2), bottom=(cy+sh/2)-y;
+      const outer=Math.min(left,right,top,bottom);
+      const R=Math.min(sw,sh)*.18;
+      const holeDist=Math.hypot(x-cx,y-cy)-R;
+      return Math.min(outer,holeDist);
+    }
+    const left=x-(cx-sw/2), right=(cx+sw/2)-x;
+    const top=y-(cy-sh/2), bottom=(cy+sh/2)-y;
+    return Math.min(left,right,top,bottom);
   }
 
   function boundaryStress(x,y){
     const {cx,cy,sw,sh}=specimenBounds();
     if(shapeSel.value!=='hole') return 0;
     const rr=Math.hypot(x-cx,y-cy);
-    const R=Math.min(sw,sh)*0.18;
-    return Math.exp(-Math.abs(rr-R)/16)*0.55;
+    const R=Math.min(sw,sh)*.18;
+    return Math.exp(-Math.abs(rr-R)/16)*.7;
   }
 
   function stressField(x,y){
-    let sx=0, sy=0, tau=0;
-    const loads=[];
-
-    if(handState[0].pinch && handState[1].pinch){
-      const a=handState[0], b=handState[1];
-      const dx=b.x-a.x, dy=b.y-a.y;
-      const d=Math.max(1,Math.hypot(dx,dy));
-      const ux=dx/d, uy=dy/d;
-
-      // 引張: 互いに外向き、圧縮: 内向き
-      const sign = grabMode==='compression' ? -1 : 1;
-      const f = clamp(Math.abs(grabStrength)*2.7 + 0.4,0.4,4.2);
-      loads.push({x:a.x,y:a.y,fx:-ux*f*sign,fy:-uy*f*sign});
-      loads.push({x:b.x,y:b.y,fx: ux*f*sign,fy: uy*f*sign});
-    }
-
-    if(mouseLoad){
-      loads.push(mouseLoad);
-    }
+    let sx=0,sy=0,tau=0;
+    const loads=activeLoads.concat(persistentLoads);
 
     for(const L of loads){
       const dx=x-L.x, dy=y-L.y;
-      const r2=dx*dx+dy*dy+140;
+      const r2=dx*dx+dy*dy+90;
       const r=Math.sqrt(r2);
       const nx=dx/r, ny=dy/r;
-      const radial=(L.fx*nx+L.fy*ny);
-      const tang=(-L.fx*ny+L.fy*nx);
-      const k=6500/r2;
-      sx += k*(radial*(1.6*nx*nx-.35) + tang*nx*ny);
-      sy += k*(radial*(1.6*ny*ny-.35) - tang*nx*ny);
-      tau += k*(radial*1.7*nx*ny + tang*(nx*nx-ny*ny)*0.65);
+
+      // 指先の圧縮荷重を、局所的な等方圧＋せん断成分として近似
+      const k=L.p*9000/r2;
+      sx += k*(1.8*nx*nx+.25);
+      sy += k*(1.8*ny*ny+.25);
+      tau += k*(1.65*nx*ny);
     }
 
     const diff=Math.sqrt((sx-sy)*(sx-sy)+4*tau*tau);
-    return diff + boundaryStress(x,y);
+    return diff+boundaryStress(x,y);
   }
 
   function spectral(v){
-    const r=.5+.5*Math.sin(v);
-    const g=.5+.5*Math.sin(v+2.094);
-    const b=.5+.5*Math.sin(v+4.188);
     return [
-      Math.floor(30+225*r),
-      Math.floor(30+225*g),
-      Math.floor(30+225*b)
+      Math.floor(30+225*(.5+.5*Math.sin(v))),
+      Math.floor(30+225*(.5+.5*Math.sin(v+2.094))),
+      Math.floor(30+225*(.5+.5*Math.sin(v+4.188)))
     ];
   }
 
@@ -276,35 +238,31 @@ button:disabled{opacity:.55;cursor:not-allowed}
   const offCtx=off.getContext('2d');
 
   function renderSimulation(){
-    const scale = W < 700 ? 0.32 : 0.40;
+    const scale=W<700?.32:.40;
     const iw=Math.max(150,Math.floor(W*scale));
     const ih=Math.max(100,Math.floor(H*scale));
-    if(off.width!==iw || off.height!==ih){ off.width=iw; off.height=ih; }
+    if(off.width!==iw||off.height!==ih){off.width=iw;off.height=ih;}
+
     const img=offCtx.createImageData(iw,ih);
     const gain=+gainEl.value;
-    const d=deformationData();
 
     for(let j=0;j<ih;j++){
       for(let i=0;i<iw;i++){
-        const x=(i+.5)/iw*W;
-        const y=(j+.5)/ih*H;
+        const x=(i+.5)/iw*W, y=(j+.5)/ih*H;
         const k=(j*iw+i)*4;
 
-        if(!insideDeformed(x,y,d)){
-          img.data[k]=0; img.data[k+1]=0; img.data[k+2]=0; img.data[k+3]=0;
+        if(!baseInside(x,y)){
+          img.data[k]=0;img.data[k+1]=0;img.data[k+2]=0;img.data[k+3]=0;
           continue;
         }
 
-        const inv=inverseDeformPoint(x,y,d);
-        let s=stressField(inv.x,inv.y)*gain;
-        if(d.active) s += Math.abs(d.stretch)*1.25;
-
-        const phase=s*8.2;
+        const s=stressField(x,y)*gain;
+        const phase=s*8.0;
         const fringe=.5+.5*Math.cos(phase*Math.PI*2);
 
         if(modeSel.value==='mono'){
-          const v=Math.floor(18+237*Math.pow(fringe,1.2));
-          img.data[k]=v; img.data[k+1]=v; img.data[k+2]=v;
+          const v=Math.floor(18+237*Math.pow(fringe,1.22));
+          img.data[k]=v;img.data[k+1]=v;img.data[k+2]=v;
         }else{
           const rgb=spectral(phase*1.55);
           const shade=.42+.58*fringe;
@@ -320,95 +278,65 @@ button:disabled{opacity:.55;cursor:not-allowed}
     ctx.clearRect(0,0,W,H);
     ctx.imageSmoothingEnabled=true;
     ctx.drawImage(off,0,0,W,H);
+    drawOutline();
 
-    drawSpecimenOutline(d);
+    const decay=+relaxEl.value;
+    persistentLoads.forEach(L=>L.p*=decay);
+    persistentLoads=persistentLoads.filter(L=>L.p>.018);
   }
 
-  function drawSpecimenOutline(d){
+  function drawOutline(){
     const {cx,cy,sw,sh}=specimenBounds();
     ctx.save();
     ctx.strokeStyle='rgba(255,255,255,.55)';
     ctx.lineWidth=1.5;
     ctx.beginPath();
-
     if(shapeSel.value==='disk'){
-      ctx.translate(cx,cy);
-      if(d.active){
-        ctx.rotate(d.angle);
-        ctx.scale(d.scaleX,d.scaleY);
-        ctx.arc(0,0,Math.min(sw,sh)/2,0,Math.PI*2);
-      }else{
-        ctx.arc(0,0,Math.min(sw,sh)/2,0,Math.PI*2);
-      }
+      ctx.arc(cx,cy,Math.min(sw,sh)/2,0,Math.PI*2);
     }else{
-      if(d.active){
-        ctx.translate(cx,cy);
-        ctx.rotate(d.angle);
-        ctx.scale(d.scaleX,d.scaleY);
-        ctx.rect(-sw/2,-sh/2,sw,sh);
-      }else{
-        ctx.rect(cx-sw/2,cy-sh/2,sw,sh);
-      }
+      ctx.rect(cx-sw/2,cy-sh/2,sw,sh);
     }
     ctx.stroke();
-    ctx.restore();
 
     if(shapeSel.value==='hole'){
-      ctx.save();
-      ctx.strokeStyle='rgba(255,255,255,.55)';
-      ctx.lineWidth=1.5;
-      const R=Math.min(sw,sh)*0.18;
       ctx.beginPath();
-      if(d.active){
-        ctx.translate(cx,cy);
-        ctx.rotate(d.angle);
-        ctx.scale(d.scaleX,d.scaleY);
-        ctx.arc(0,0,R,0,Math.PI*2);
-      }else{
-        ctx.arc(cx,cy,R,0,Math.PI*2);
-      }
+      ctx.arc(cx,cy,Math.min(sw,sh)*.18,0,Math.PI*2);
       ctx.stroke();
-      ctx.restore();
     }
+    ctx.restore();
   }
 
   function drawHUD(){
     hctx.clearRect(0,0,W,H);
-    const hands=handState.filter(h=>h.visible);
 
-    for(const h of hands){
+    for(const f of fingertipState){
+      if(!f.visible) continue;
+
+      const touching=f.pressure>0.01;
+      const radius=touching?10+f.pressure*10:6;
+
       hctx.beginPath();
-      hctx.arc(h.x,h.y,h.pinch?16:10,0,Math.PI*2);
-      hctx.strokeStyle=h.pinch?'rgba(125,211,252,.95)':'rgba(255,255,255,.65)';
-      hctx.lineWidth=h.pinch?3:2;
+      hctx.arc(f.x,f.y,radius,0,Math.PI*2);
+      hctx.strokeStyle=touching
+        ? 'rgba(125,211,252,.95)'
+        : 'rgba(255,255,255,.45)';
+      hctx.lineWidth=touching?3:1.5;
       hctx.stroke();
 
-      if(h.pinch){
+      if(touching){
         hctx.beginPath();
-        hctx.arc(h.x,h.y,5,0,Math.PI*2);
+        hctx.arc(f.x,f.y,4+f.pressure*3,0,Math.PI*2);
         hctx.fillStyle='rgba(125,211,252,.95)';
         hctx.fill();
       }
     }
 
-    if(handState[0].pinch && handState[1].pinch){
-      const a=handState[0], b=handState[1];
-      hctx.beginPath();
-      hctx.moveTo(a.x,a.y); hctx.lineTo(b.x,b.y);
-      hctx.strokeStyle=grabMode==='compression'
-        ? 'rgba(255,255,255,.8)'
-        : 'rgba(125,211,252,.8)';
-      hctx.lineWidth=2;
-      hctx.setLineDash([8,8]);
-      hctx.stroke();
-      hctx.setLineDash([]);
-
-      const mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
+    const touching=activeLoads.length;
+    if(touching){
       hctx.font='14px system-ui';
       hctx.fillStyle='rgba(255,255,255,.92)';
       hctx.textAlign='center';
-      const txt=grabMode==='compression' ? '圧縮' : '引張';
-      hctx.fillText(`${txt}  ${Math.abs(grabStrength*100).toFixed(0)}%`,mx,my-14);
+      hctx.fillText(`接触 ${touching}点`,W/2,36);
     }
   }
 
@@ -418,150 +346,111 @@ button:disabled{opacity:.55;cursor:not-allowed}
     requestAnimationFrame(animate);
   }
 
-  function distance2D(a,b){
-    return Math.hypot(a.x-b.x,a.y-b.y);
+  function updateLoadsFromFingers(){
+    activeLoads=[];
+
+    for(const f of fingertipState){
+      if(!f.visible){ f.pressure=0; continue; }
+
+      const depth=signedInteriorDepth(f.x,f.y);
+      if(depth<=0){ f.pressure=0; continue; }
+
+      const speed=Math.hypot(f.x-f.px,f.y-f.py);
+      const depthTerm=clamp(depth/70,0,1);
+      const speedTerm=clamp(speed/28,0,1);
+
+      // 接触して少し内側に入るだけでも圧が出る。素早く押すほど増幅。
+      const pressure=clamp((0.18+depthTerm*.82+speedTerm*.6)*(+pressureGainEl.value),0,3);
+      f.pressure=pressure;
+
+      activeLoads.push({x:f.x,y:f.y,p:pressure});
+      persistentLoads.push({x:f.x,y:f.y,p:pressure*.18});
+    }
+
+    if(activeLoads.length){
+      const avg=activeLoads.reduce((s,l)=>s+l.p,0)/activeLoads.length;
+      statusEl.innerHTML=`<strong>接触中:</strong> ${activeLoads.length}指 / 平均圧 ${avg.toFixed(2)}`;
+    }else if(handsReady){
+      statusEl.innerHTML='<strong>待機中:</strong> 指先を透明体へ触れさせてください。';
+    }
   }
 
   function onResults(results){
-    handState.forEach(h=>{h.visible=false;h.pinch=false;});
-    const list=results.multiHandLandmarks || [];
+    fingertipState.forEach(f=>f.visible=false);
 
-    list.slice(0,2).forEach((lm,idx)=>{
-      const thumb=lm[4], index=lm[8], wrist=lm[0], middle=lm[12];
-      const pinchNorm=distance2D(thumb,index);
-      const handScale=Math.max(0.08,distance2D(wrist,middle));
-      const ratio=pinchNorm/handScale;
+    const hands=results.multiHandLandmarks||[];
 
-      // 入り/抜けに少しヒステリシス
-      const prev=handState[idx].pinch;
-      const pinch = prev ? ratio < 0.43 : ratio < 0.34;
+    hands.slice(0,2).forEach((lm,hIndex)=>{
+      TIP_IDS.forEach((tipId,fingerIndex)=>{
+        const p=lm[tipId];
+        const idx=hIndex*5+fingerIndex;
+        const f=fingertipState[idx];
 
-      // カメラ映像は左右反転しているので座標も反転
-      const x=(1-index.x)*W;
-      const y=index.y*H;
+        const x=(1-p.x)*W;
+        const y=p.y*H;
 
-      const h=handState[idx];
-      h.visible=true;
-      h.pinch=pinch;
-      h.rawX=x; h.rawY=y;
-      h.x=h.x ? lerp(h.x,x,.38) : x;
-      h.y=h.y ? lerp(h.y,y,.38) : y;
-
-      const handed=results.multiHandedness?.[idx];
-      h.label=handed?.label || '';
-      h.score=handed?.score || 0;
+        f.visible=true;
+        f.px=f.x||x;
+        f.py=f.y||y;
+        f.x=f.x?lerp(f.x,x,.42):x;
+        f.y=f.y?lerp(f.y,y,.42):y;
+      });
     });
 
-    updateGrabState();
-  }
-
-  function updateGrabState(){
-    const both=handState[0].pinch && handState[1].pinch;
-    if(both){
-      const a=handState[0], b=handState[1];
-      currentDistance=Math.hypot(b.x-a.x,b.y-a.y);
-
-      if(!grabBaseline){
-        grabBaseline={a:{x:a.x,y:a.y},b:{x:b.x,y:b.y}};
-        baseDistance=currentDistance;
-        grabMidBaseline={x:(a.x+b.x)/2,y:(a.y+b.y)/2};
-        grabVectorBaseline={x:b.x-a.x,y:b.y-a.y};
-      }
-
-      grabStrength=(currentDistance-baseDistance)/Math.max(baseDistance,1);
-      grabMode=grabStrength<0 ? 'compression' : 'tension';
-
-      statusEl.innerHTML =
-        `<strong>両手で把持中:</strong> ${grabMode==='compression'?'圧縮':'引張'} `+
-        `${Math.abs(grabStrength*100).toFixed(0)}%`;
-    }else{
-      if(grabBaseline){
-        grabBaseline=null;
-        grabMidBaseline=null;
-        grabVectorBaseline=null;
-        grabStrength=0;
-        grabMode='none';
-      }
-    }
+    updateLoadsFromFingers();
   }
 
   async function startCamera(){
-    if(handsReady){
-      statusEl.innerHTML='<strong>カメラ:</strong> すでに起動しています。';
-      return;
-    }
-    if(!navigator.mediaDevices?.getUserMedia){
-      statusEl.innerHTML='<strong>エラー:</strong> このブラウザではカメラAPIを利用できません。';
-      return;
-    }
-
+    if(handsReady) return;
     startCamBtn.disabled=true;
     startCamBtn.textContent='起動中…';
 
     try{
-      const hands = new Hands({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+      const hands=new Hands({
+        locateFile:file=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
       });
+
       hands.setOptions({
-        maxNumHands: 2,
-        modelComplexity: 1,
-        minDetectionConfidence: 0.65,
-        minTrackingConfidence: 0.65
+        maxNumHands:2,
+        modelComplexity:1,
+        minDetectionConfidence:.65,
+        minTrackingConfidence:.65
       });
+
       hands.onResults(onResults);
 
-      camera = new Camera(video, {
-        onFrame: async () => { await hands.send({image:video}); },
-        width: 1280,
-        height: 720
+      camera=new Camera(video,{
+        onFrame:async()=>{await hands.send({image:video});},
+        width:1280,
+        height:720
       });
+
       await camera.start();
       handsReady=true;
       startCamBtn.textContent='カメラ起動済み';
-      statusEl.innerHTML='<strong>準備完了:</strong> 両手の親指＋人差し指をピンチしてください。';
+      statusEl.innerHTML='<strong>準備完了:</strong> 指先を透明体へ触れさせてください。';
     }catch(err){
       console.error(err);
-      statusEl.innerHTML='<strong>カメラ起動に失敗:</strong> カメラ許可、HTTPS、他アプリでの使用中かを確認してください。';
+      statusEl.innerHTML='<strong>カメラ起動に失敗:</strong> HTTPS、カメラ許可、他アプリでの使用状況を確認してください。';
       startCamBtn.disabled=false;
       startCamBtn.textContent='カメラ開始';
     }
   }
 
-  function canvasPos(e){
-    const r=sim.getBoundingClientRect();
-    return {x:e.clientX-r.left,y:e.clientY-r.top};
-  }
-
-  sim.addEventListener('pointerdown',e=>{
-    const p=canvasPos(e);
-    pointer.down=true; pointer.x=p.x;pointer.y=p.y;pointer.px=p.x;pointer.py=p.y;
-    sim.setPointerCapture?.(e.pointerId);
-  });
-  sim.addEventListener('pointermove',e=>{
-    if(!pointer.down)return;
-    const p=canvasPos(e);
-    const dx=p.x-pointer.px,dy=p.y-pointer.py;
-    pointer.force=clamp(Math.hypot(dx,dy)*0.04+0.4,0.4,3.5);
-    mouseLoad={x:p.x,y:p.y,fx:dx*0.12,fy:dy*0.12};
-    pointer.px=p.x;pointer.py=p.y;
-  });
-  function releasePointer(){
-    pointer.down=false;
-    mouseLoad=null;
-  }
-  sim.addEventListener('pointerup',releasePointer);
-  sim.addEventListener('pointercancel',releasePointer);
-
   startCamBtn.addEventListener('click',startCamera);
   resetBtn.addEventListener('click',()=>{
-    grabBaseline=null;grabStrength=0;grabMode='none';mouseLoad=null;
-    statusEl.innerHTML='<strong>リセットしました。</strong> 両手ピンチで再開できます。';
+    activeLoads=[];
+    persistentLoads=[];
+    fingertipState.forEach(f=>f.pressure=0);
+    statusEl.innerHTML='<strong>リセットしました。</strong>';
   });
-  shapeSel.addEventListener('change',()=>{
-    grabBaseline=null;grabStrength=0;grabMode='none';
-  });
-  window.addEventListener('resize',resize);
 
+  shapeSel.addEventListener('change',()=>{
+    activeLoads=[];
+    persistentLoads=[];
+  });
+
+  window.addEventListener('resize',resize);
   resize();
   animate();
 })();
