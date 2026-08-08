@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Interactive Photoelasticity — Finger Tracking</title>
+<title>Interactive Photoelasticity — Finger Tracking Delay Square</title>
 <style>
 :root{
   --bg:#07090d;
@@ -18,13 +18,14 @@ body{min-height:100vh;overflow:hidden}
 .app{position:relative;width:100vw;height:100vh;background:#05070a}
 video{
   position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
-  transform:scaleX(-1);filter:brightness(.42) saturate(.72) blur(1px);
+  transform:scaleX(-1);
+  filter:brightness(.42) saturate(.72) blur(1px);
 }
 canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
 #sim{z-index:2}
 #hud{z-index:3;pointer-events:none}
 .panel{
-  position:absolute;z-index:5;left:16px;top:16px;width:min(410px,calc(100vw - 32px));
+  position:absolute;z-index:5;left:16px;top:16px;width:min(420px,calc(100vw - 32px));
   background:var(--panel);border:1px solid var(--line);border-radius:16px;
   padding:14px;backdrop-filter:blur(14px);
 }
@@ -39,10 +40,10 @@ button{cursor:pointer}
 button.primary{background:#16384b;border-color:#285f7d}
 button:disabled{opacity:.55;cursor:not-allowed}
 .rangeWrap{margin-top:10px}
-.status{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
+.status{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.55}
 .status strong{color:var(--text)}
 .legend{
-  position:absolute;z-index:5;right:16px;bottom:16px;max-width:400px;
+  position:absolute;z-index:5;right:16px;bottom:16px;max-width:410px;
   background:var(--panel);border:1px solid var(--line);border-radius:14px;
   padding:10px 12px;backdrop-filter:blur(12px);font-size:12px;color:var(--muted);
   line-height:1.55
@@ -64,25 +65,25 @@ button:disabled{opacity:.55;cursor:not-allowed}
   <div class="panel">
     <div class="row">
       <div>
-        <label for="shape">試験片</label>
-        <select id="shape">
-          <option value="rect">長方形</option>
-          <option value="disk">円板</option>
-          <option value="hole">穴あき板</option>
+        <label for="mode">表示</label>
+        <select id="mode">
+          <option value="color">干渉色（緑なし）</option>
+          <option value="mono">白黒縞</option>
         </select>
       </div>
       <div>
-        <label for="mode">表示</label>
-        <select id="mode">
-          <option value="color">干渉色</option>
-          <option value="mono">白黒縞</option>
+        <label for="delay">干渉タイムラグ</label>
+        <select id="delay">
+          <option value="1000" selected>1.0 秒</option>
+          <option value="700">0.7 秒</option>
+          <option value="1500">1.5 秒</option>
         </select>
       </div>
     </div>
 
     <div class="rangeWrap">
       <label for="gain">光弾性感度</label>
-      <input id="gain" type="range" min="1" max="14" value="7.4" step="0.1">
+      <input id="gain" type="range" min="1" max="14" value="7.2" step="0.1">
     </div>
 
     <div class="rangeWrap">
@@ -106,15 +107,15 @@ button:disabled{opacity:.55;cursor:not-allowed}
     </div>
 
     <div id="status" class="status">
-      <strong>操作:</strong> 指先を透明体に触れさせてください。<br>
-      親指・人差し指・中指・薬指・小指の各指先に反応します。
+      <strong>操作:</strong> 指先を正方形の透明板に触れさせてください。<br>
+      指先の接触はすぐ検出され、干渉縞は<strong>1秒後</strong>に表示されます。
     </div>
   </div>
 
   <div class="legend">
     <span class="badge">指先トラッキング</span>
-    <span class="badge">指ごとの重み</span>
-    <span class="badge">局所へこみ</span><br>
+    <span class="badge">1秒タイムラグ</span>
+    <span class="badge">正方形フレーム</span><br>
     <div class="small">ベース技術: Google MediaPipe Hands（21点ランドマーク）</div>
   </div>
 </div>
@@ -129,8 +130,8 @@ button:disabled{opacity:.55;cursor:not-allowed}
   const ctx = sim.getContext('2d');
   const hctx = hud.getContext('2d');
 
-  const shapeSel = document.getElementById('shape');
-  const modeSel = document.getElementById('mode');
+  const modeEl = document.getElementById('mode');
+  const delayEl = document.getElementById('delay');
   const gainEl = document.getElementById('gain');
   const pressureGainEl = document.getElementById('pressureGain');
   const dentStrengthEl = document.getElementById('dentStrength');
@@ -141,12 +142,11 @@ button:disabled{opacity:.55;cursor:not-allowed}
 
   let W=0,H=0,DPR=1;
   let camera=null,handsReady=false;
+  let activeLoads = [];
+  let persistentLoads = [];
 
   const off = document.createElement('canvas');
   const offCtx = off.getContext('2d');
-
-  let activeLoads = [];
-  let persistentLoads = [];
 
   const TIP_IDS = [4,8,12,16,20];
   const TIP_LABELS = ['thumb','index','middle','ring','pinky'];
@@ -164,7 +164,8 @@ button:disabled{opacity:.55;cursor:not-allowed}
     px:0,py:0,
     pressure:0,
     weight:1,
-    label:TIP_LABELS[i%5]
+    label:TIP_LABELS[i%5],
+    history:[]
   }));
 
   const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
@@ -172,7 +173,8 @@ button:disabled{opacity:.55;cursor:not-allowed}
 
   function resize(){
     DPR = Math.min(window.devicePixelRatio || 1, 2);
-    W = window.innerWidth; H = window.innerHeight;
+    W = window.innerWidth;
+    H = window.innerHeight;
     for(const c of [sim,hud]){
       c.width = Math.round(W*DPR);
       c.height = Math.round(H*DPR);
@@ -183,49 +185,22 @@ button:disabled{opacity:.55;cursor:not-allowed}
   }
 
   function specimenBounds(){
-    const sw = Math.min(W*.62, 720);
-    const sh = Math.min(H*.48, 420);
-    return {cx:W/2, cy:H/2+20, sw, sh};
+    const side = Math.min(W*0.5, H*0.5, 420);
+    return {cx:W/2, cy:H/2+20, side};
   }
 
   function baseInside(x,y){
-    const {cx,cy,sw,sh}=specimenBounds();
-    const nx=(x-cx)/(sw/2), ny=(y-cy)/(sh/2);
-    if(shapeSel.value==='disk') return nx*nx + ny*ny <= 1;
-    if(shapeSel.value==='hole'){
-      const outer=Math.abs(nx)<=1 && Math.abs(ny)<=1;
-      const R=Math.min(sw,sh)*.18;
-      const hole=((x-cx)**2 + (y-cy)**2) < R*R;
-      return outer && !hole;
-    }
-    return Math.abs(nx)<=1 && Math.abs(ny)<=1;
+    const {cx,cy,side}=specimenBounds();
+    return Math.abs(x-cx) <= side/2 && Math.abs(y-cy) <= side/2;
   }
 
   function signedInteriorDepth(x,y){
-    const {cx,cy,sw,sh}=specimenBounds();
-    if(shapeSel.value==='disk'){
-      const R=Math.min(sw,sh)/2;
-      return R - Math.hypot(x-cx, y-cy);
-    }
-    if(shapeSel.value==='hole'){
-      const left=x-(cx-sw/2), right=(cx+sw/2)-x;
-      const top=y-(cy-sh/2), bottom=(cy+sh/2)-y;
-      const outer=Math.min(left,right,top,bottom);
-      const R=Math.min(sw,sh)*.18;
-      const holeDist=Math.hypot(x-cx,y-cy)-R;
-      return Math.min(outer, holeDist);
-    }
-    const left=x-(cx-sw/2), right=(cx+sw/2)-x;
-    const top=y-(cy-sh/2), bottom=(cy+sh/2)-y;
+    const {cx,cy,side}=specimenBounds();
+    const left = x-(cx-side/2);
+    const right = (cx+side/2)-x;
+    const top = y-(cy-side/2);
+    const bottom = (cy+side/2)-y;
     return Math.min(left,right,top,bottom);
-  }
-
-  function boundaryStress(x,y){
-    const {cx,cy,sw,sh}=specimenBounds();
-    if(shapeSel.value!=='hole') return 0;
-    const rr=Math.hypot(x-cx,y-cy);
-    const R=Math.min(sw,sh)*.18;
-    return Math.exp(-Math.abs(rr-R)/16)*.7;
   }
 
   function stressField(x,y){
@@ -243,8 +218,7 @@ button:disabled{opacity:.55;cursor:not-allowed}
       tau += k*(1.65*nx*ny);
     }
 
-    const diff = Math.sqrt((sx-sy)*(sx-sy)+4*tau*tau);
-    return diff + boundaryStress(x,y);
+    return Math.sqrt((sx-sy)*(sx-sy)+4*tau*tau);
   }
 
   function dentField(x,y){
@@ -259,16 +233,21 @@ button:disabled{opacity:.55;cursor:not-allowed}
     return clamp(v, 0, 1.6);
   }
 
-  function spectral(v){
+  function interferencePaletteNoGreen(v, fringe){
+    const r = 0.5 + 0.5*Math.sin(v);
+    const b = 0.5 + 0.5*Math.sin(v + 2.2);
+    const w = 0.5 + 0.5*Math.sin(v + 1.1);
     return [
-      Math.floor(30+225*(.5+.5*Math.sin(v))),
-      Math.floor(30+225*(.5+.5*Math.sin(v+2.094))),
-      Math.floor(30+225*(.5+.5*Math.sin(v+4.188)))
+      Math.floor(40 + 180*r + 35*w),
+      Math.floor(8 + 22*fringe),
+      Math.floor(55 + 170*b + 30*w)
     ];
   }
 
   function updateLoadsFromFingers(){
     activeLoads = [];
+    const now = performance.now();
+    const delayMs = +delayEl.value;
 
     for(const f of fingertips){
       if(!f.visible){
@@ -277,30 +256,62 @@ button:disabled{opacity:.55;cursor:not-allowed}
       }
 
       const depth = signedInteriorDepth(f.x,f.y);
-      if(depth <= 0){
-        f.pressure = 0;
-        continue;
+      let currentPressure = 0;
+
+      if(depth > 0){
+        const speed = Math.hypot(f.x-f.px, f.y-f.py);
+        const depthTerm = clamp(depth/72, 0, 1);
+        const speedTerm = clamp(speed/24, 0, 1);
+        currentPressure = clamp(
+          (0.16 + depthTerm*0.85 + speedTerm*0.55) * f.weight * (+pressureGainEl.value),
+          0, 4
+        );
       }
 
-      const speed = Math.hypot(f.x-f.px, f.y-f.py);
-      const depthTerm = clamp(depth/72, 0, 1);
-      const speedTerm = clamp(speed/24, 0, 1);
+      f.pressure = currentPressure;
 
-      const pressure = clamp(
-        (0.16 + depthTerm*0.85 + speedTerm*0.55) * f.weight * (+pressureGainEl.value),
-        0, 4
-      );
-      f.pressure = pressure;
+      f.history.push({
+        t: now,
+        x: f.x,
+        y: f.y,
+        p: currentPressure,
+        weight: f.weight
+      });
 
-      activeLoads.push({x:f.x, y:f.y, p:pressure, weight:f.weight});
-      persistentLoads.push({x:f.x, y:f.y, p:pressure*0.12, weight:f.weight});
+      while(f.history.length && now - f.history[0].t > 2200){
+        f.history.shift();
+      }
+
+      let delayed = null;
+      const target = now - delayMs;
+      for(let i=f.history.length-1; i>=0; i--){
+        if(f.history[i].t <= target){
+          delayed = f.history[i];
+          break;
+        }
+      }
+
+      if(delayed && delayed.p > 0 && baseInside(delayed.x, delayed.y)){
+        activeLoads.push({
+          x: delayed.x,
+          y: delayed.y,
+          p: delayed.p,
+          weight: delayed.weight
+        });
+        persistentLoads.push({
+          x: delayed.x,
+          y: delayed.y,
+          p: delayed.p*0.11,
+          weight: delayed.weight
+        });
+      }
     }
 
     if(activeLoads.length){
       const avg = activeLoads.reduce((s,l)=>s+l.p,0)/activeLoads.length;
-      statusEl.innerHTML = `<strong>接触中:</strong> ${activeLoads.length}指 / 平均圧 ${avg.toFixed(2)}`;
+      statusEl.innerHTML = `<strong>接触中:</strong> 現在の接触を検出中 / 干渉表示 ${activeLoads.length}点 / 平均圧 ${avg.toFixed(2)} / 遅延 ${(+delayEl.value/1000).toFixed(1)}秒`;
     } else if(handsReady){
-      statusEl.innerHTML = '<strong>待機中:</strong> 指先を透明体に触れさせてください。';
+      statusEl.innerHTML = `<strong>待機中:</strong> 指先を透明板に触れさせてください。干渉表示は ${(+delayEl.value/1000).toFixed(1)} 秒後です。`;
     }
   }
 
@@ -330,19 +341,19 @@ button:disabled{opacity:.55;cursor:not-allowed}
         const phase = s*8.0 + dent*0.8;
         const fringe = .5 + .5*Math.cos(phase*Math.PI*2);
 
-        if(modeSel.value==='mono'){
-          let v = Math.floor(18+237*Math.pow(fringe,1.22));
+        if(modeEl.value==='mono'){
+          let v = Math.floor(18 + 237*Math.pow(fringe,1.22));
           v = clamp(v - dent*34, 0, 255);
           img.data[k]=v; img.data[k+1]=v; img.data[k+2]=v;
-        }else{
-          const rgb=spectral(phase*1.55);
-          let shade=.42+.58*fringe;
+        } else {
+          const rgb = interferencePaletteNoGreen(phase*1.55, fringe);
+          let shade = .42 + .58*fringe;
           shade *= (1 - dent*0.15);
           img.data[k]=clamp(rgb[0]*shade,0,255);
           img.data[k+1]=clamp(rgb[1]*shade,0,255);
           img.data[k+2]=clamp(rgb[2]*shade,0,255);
         }
-        img.data[k+3]=225;
+        img.data[k+3]=220;
       }
     }
 
@@ -352,7 +363,7 @@ button:disabled{opacity:.55;cursor:not-allowed}
     ctx.drawImage(off,0,0,W,H);
 
     drawIndentationHighlights();
-    drawOutline();
+    drawWhiteFrame();
 
     const decay = +relaxEl.value;
     persistentLoads.forEach(L=>L.p*=decay);
@@ -384,24 +395,16 @@ button:disabled{opacity:.55;cursor:not-allowed}
     ctx.restore();
   }
 
-  function drawOutline(){
-    const {cx,cy,sw,sh}=specimenBounds();
+  function drawWhiteFrame(){
+    const {cx,cy,side}=specimenBounds();
     ctx.save();
-    ctx.strokeStyle='rgba(255,255,255,.55)';
-    ctx.lineWidth=1.5;
-    ctx.beginPath();
-    if(shapeSel.value==='disk'){
-      ctx.arc(cx,cy,Math.min(sw,sh)/2,0,Math.PI*2);
-    }else{
-      ctx.rect(cx-sw/2,cy-sh/2,sw,sh);
-    }
-    ctx.stroke();
+    ctx.strokeStyle='rgba(255,255,255,.92)';
+    ctx.lineWidth=1.6;
+    ctx.strokeRect(cx-side/2, cy-side/2, side, side);
 
-    if(shapeSel.value==='hole'){
-      ctx.beginPath();
-      ctx.arc(cx,cy,Math.min(sw,sh)*.18,0,Math.PI*2);
-      ctx.stroke();
-    }
+    ctx.strokeStyle='rgba(255,255,255,.18)';
+    ctx.lineWidth=5;
+    ctx.strokeRect(cx-side/2, cy-side/2, side, side);
     ctx.restore();
   }
 
@@ -410,16 +413,17 @@ button:disabled{opacity:.55;cursor:not-allowed}
 
     for(const f of fingertips){
       if(!f.visible) continue;
-      const touching = f.pressure > 0.01;
-      const radius = touching ? 10 + f.pressure*3.5 : 6.5;
+
+      const touchingNow = f.pressure > 0.01;
+      const radius = touchingNow ? 10 + f.pressure*3.5 : 6.5;
 
       hctx.beginPath();
       hctx.arc(f.x, f.y, radius, 0, Math.PI*2);
-      hctx.strokeStyle = touching ? 'rgba(125,211,252,.96)' : 'rgba(255,255,255,.45)';
-      hctx.lineWidth = touching ? 3 : 1.5;
+      hctx.strokeStyle = touchingNow ? 'rgba(125,211,252,.96)' : 'rgba(255,255,255,.45)';
+      hctx.lineWidth = touchingNow ? 3 : 1.5;
       hctx.stroke();
 
-      if(touching){
+      if(touchingNow){
         hctx.beginPath();
         hctx.arc(f.x, f.y, 3.5 + f.pressure*1.4, 0, Math.PI*2);
         hctx.fillStyle = 'rgba(125,211,252,.95)';
@@ -436,7 +440,7 @@ button:disabled{opacity:.55;cursor:not-allowed}
       hctx.font='14px system-ui';
       hctx.fillStyle='rgba(255,255,255,.92)';
       hctx.textAlign='center';
-      hctx.fillText(`指圧 ${activeLoads.length}点`, W/2, 36);
+      hctx.fillText(`干渉 ${activeLoads.length}点`, W/2, 36);
     }
   }
 
@@ -499,7 +503,7 @@ button:disabled{opacity:.55;cursor:not-allowed}
       await camera.start();
       handsReady = true;
       startCamBtn.textContent = 'カメラ起動済み';
-      statusEl.innerHTML = '<strong>準備完了:</strong> 指先を透明体に触れさせてください。';
+      statusEl.innerHTML = `<strong>準備完了:</strong> 指先を透明板に触れさせてください。干渉表示は ${(+delayEl.value/1000).toFixed(1)} 秒後です。`;
     }catch(err){
       console.error(err);
       statusEl.innerHTML = '<strong>カメラ起動に失敗:</strong> HTTPS、カメラ許可、他アプリでの使用状況を確認してください。';
@@ -508,24 +512,26 @@ button:disabled{opacity:.55;cursor:not-allowed}
     }
   }
 
-  startCamBtn.addEventListener('click', startCamera);
-  resetBtn.addEventListener('click', () => {
+  function resetAll(){
     activeLoads = [];
     persistentLoads = [];
     fingertips.forEach(f => {
       f.visible = false;
       f.pressure = 0;
       f.x = f.y = f.px = f.py = 0;
+      f.history = [];
     });
-    statusEl.innerHTML = '<strong>リセットしました。</strong>';
-  });
+    statusEl.innerHTML = `<strong>リセットしました。</strong> 干渉表示は ${(+delayEl.value/1000).toFixed(1)} 秒後です。`;
+  }
 
-  shapeSel.addEventListener('change', () => {
-    activeLoads = [];
-    persistentLoads = [];
+  startCamBtn.addEventListener('click', startCamera);
+  resetBtn.addEventListener('click', resetAll);
+  delayEl.addEventListener('change', () => {
+    statusEl.innerHTML = `<strong>設定更新:</strong> 干渉表示の遅延を ${(+delayEl.value/1000).toFixed(1)} 秒に変更しました。`;
   });
 
   window.addEventListener('resize', resize);
+
   resize();
   animate();
 })();
