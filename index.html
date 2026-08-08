@@ -22,7 +22,7 @@ video{
   filter:brightness(.42) saturate(.72) blur(1px);
 }
 canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
-#sim{z-index:2}
+#sim{z-index:2;mix-blend-mode:screen}
 #hud{z-index:3;pointer-events:none}
 .panel{
   position:absolute;z-index:5;left:16px;top:16px;width:min(430px,calc(100vw - 32px));
@@ -112,12 +112,12 @@ button:disabled{opacity:.55;cursor:not-allowed}
 
     <div id="status" class="status">
       <strong>操作:</strong> 人差し指と中指だけが反応します。<br>
-      白枠内は透明で、指が触れた応力領域だけ干渉縞が設定したタイムラグ後に表示されます。
+      白枠内は透明で、指が触れた応力領域だけ干渉縞が設定したタイムラグ後にカメラ映像へオーバーレイ表示されます。
     </div>
   </div>
 
   <div class="legend">
-    <span class="badge">人差し指 + 中指のみ</span>
+    <span class="badge">人差し指 + 中指のみ</span> <span class="badge">指先アイコン非表示</span>
     <span class="badge">タイムラグ可変</span>
     <span class="badge">透明板</span> <span class="badge">明るいレインボー</span><br>
     <div class="small">ベース技術: Google MediaPipe Hands（21点ランドマーク）</div>
@@ -448,34 +448,10 @@ button:disabled{opacity:.55;cursor:not-allowed}
   function drawHUD(){
     hctx.clearRect(0,0,W,H);
 
-    for(const f of fingertips){
-      if(!f.visible) continue;
-
-      const touchingNow = f.pressure > 0.01;
-      const radius = touchingNow ? 10 + f.pressure*4 : 7;
-
-      hctx.beginPath();
-      hctx.arc(f.x, f.y, radius, 0, Math.PI*2);
-      hctx.strokeStyle = touchingNow ? 'rgba(125,211,252,.96)' : 'rgba(255,255,255,.45)';
-      hctx.lineWidth = touchingNow ? 3 : 1.5;
-      hctx.stroke();
-
-      if(touchingNow){
-        hctx.beginPath();
-        hctx.arc(f.x, f.y, 3.5 + f.pressure*1.5, 0, Math.PI*2);
-        hctx.fillStyle = 'rgba(125,211,252,.95)';
-        hctx.fill();
-      }
-
-      hctx.font = '10px system-ui';
-      hctx.textAlign = 'center';
-      hctx.fillStyle = 'rgba(255,255,255,.88)';
-      hctx.fillText(f.label, f.x, f.y - radius - 4);
-    }
-
+    // 指先アイコンは非表示。必要最小限の情報だけ残す。
     if(activeLoads.length){
       hctx.font='14px system-ui';
-      hctx.fillStyle='rgba(255,255,255,.92)';
+      hctx.fillStyle='rgba(255,255,255,.90)';
       hctx.textAlign='center';
       hctx.fillText(`干渉 ${activeLoads.length}点`, W/2, 36);
     }
