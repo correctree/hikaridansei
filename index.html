@@ -22,7 +22,7 @@ video{
   filter:brightness(.42) saturate(.72) blur(1px);
 }
 canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
-#sim{z-index:2;mix-blend-mode:screen}
+#sim{z-index:2}
 #hud{z-index:3;pointer-events:none}
 .panel{
   position:absolute;z-index:5;left:16px;top:16px;width:min(430px,calc(100vw - 32px));
@@ -68,7 +68,7 @@ button:disabled{opacity:.55;cursor:not-allowed}
       <div>
         <label for="mode">表示</label>
         <select id="mode">
-          <option value="color" selected>明るいレインボー</option>
+          <option value="color" selected>光弾性カラー（白色光近似）</option>
           <option value="mono">白黒縞</option>
         </select>
       </div>
@@ -84,6 +84,12 @@ button:disabled{opacity:.55;cursor:not-allowed}
       <input id="delay" type="range" min="0" max="2.5" value="1.0" step="0.05">
       <div id="delayReadout" class="rangeReadout"></div>
     </div>
+    <div class="rangeWrap">
+      <label for="overlayOpacity">干渉色の透明度</label>
+      <input id="overlayOpacity" type="range" min="0" max="1" value="0.72" step="0.01">
+      <div id="overlayOpacityReadout" class="rangeReadout">現在: 72%</div>
+    </div>
+
 
     <div class="rangeWrap">
       <label for="gain">光弾性感度</label>
@@ -112,14 +118,14 @@ button:disabled{opacity:.55;cursor:not-allowed}
 
     <div id="status" class="status">
       <strong>操作:</strong> 人差し指と中指だけが反応します。<br>
-      白枠内は透明で、指が触れた応力領域だけ干渉縞が設定したタイムラグ後にカメラ映像へオーバーレイ表示されます。
+      白枠内は透明で、応力光学則を近似した等色線が設定したタイムラグ後にカメラ映像へオーバーレイ表示されます。
     </div>
   </div>
 
   <div class="legend">
     <span class="badge">人差し指 + 中指のみ</span> <span class="badge">指先アイコン非表示</span>
     <span class="badge">タイムラグ可変</span>
-    <span class="badge">透明板</span> <span class="badge">明るいレインボー</span><br>
+    <span class="badge">透明板</span> <span class="badge">光弾性カラー（白色光近似）</span><br>
     <div class="small">ベース技術: Google MediaPipe Hands（21点ランドマーク）</div>
   </div>
 </div>
@@ -139,6 +145,8 @@ button:disabled{opacity:.55;cursor:not-allowed}
   const frameScaleReadout = document.getElementById('frameScaleReadout');
   const delayEl = document.getElementById('delay');
   const delayReadout = document.getElementById('delayReadout');
+  const overlayOpacityEl = document.getElementById('overlayOpacity');
+  const overlayOpacityReadout = document.getElementById('overlayOpacityReadout');
   const gainEl = document.getElementById('gain');
   const pressureGainEl = document.getElementById('pressureGain');
   const dentStrengthEl = document.getElementById('dentStrength');
@@ -244,32 +252,37 @@ button:disabled{opacity:.55;cursor:not-allowed}
     return clamp(v, 0, 1.8);
   }
 
-  function hsvToRgb(h,s,v){
-    const c = v*s;
-    const hh = (h % 360) / 60;
-    const x = c*(1-Math.abs(hh%2-1));
-    let r=0,g=0,b=0;
-    if(hh>=0 && hh<1){ r=c; g=x; }
-    else if(hh<2){ r=x; g=c; }
-    else if(hh<3){ g=c; b=x; }
-    else if(hh<4){ g=x; b=c; }
-    else if(hh<5){ r=x; b=c; }
-    else { r=c; b=x; }
-    const m = v-c;
-    return [
-      Math.round((r+m)*255),
-      Math.round((g+m)*255),
-      Math.round((b+m)*255)
-    ];
-  }
+  // 円偏光・暗視野ポラリスコープの等色線を近似。
+  // 主応力差に比例するリターデーションを作り、
+  // R=650nm / G=550nm / B=450nm の代表波長ごとに
+  // I = sin^2(delta/2) の透過強度を計算する。
+  function photoelasticRGB(stressProxy){
+    const lambdaR = 650;
+    const lambdaG = 550;
+    const lambdaB = 450;
+    const lambdaRef = 550;
 
-  function rainbowTone(phase, fringe){
-    // 明るめレインボー。色相による透明化は行わない。
-    const hue = (phase * 120) % 360;
-    const sat = 0.68 + 0.24*fringe;
-    const val = 0.90 + 0.10*fringe;
-    const rgb = hsvToRgb(hue, Math.min(1,sat), Math.min(1,val));
-    return {rgb, alpha:235, hue};
+    // stressProxy は画面内の疑似主応力差。
+    // calibration は見た目を調整する表示用係数で、実材料の校正値ではない。
+    const calibration = 5.4;
+    const retardation = Math.max(0, stressProxy) * calibration;
+
+    function channel(lambda){
+      const delta = Math.PI * 2 * retardation * (lambdaRef / lambda);
+      return Math.sin(delta * 0.5) ** 2;
+    }
+
+    const ir = channel(lambdaR);
+    const ig = channel(lambdaG);
+    const ib = channel(lambdaB);
+    const whiteLift = 0.10 * Math.min(1, (ir + ig + ib) / 1.5);
+
+    return {
+      r: Math.round(255 * Math.min(1, ir + whiteLift)),
+      g: Math.round(255 * Math.min(1, ig + whiteLift)),
+      b: Math.round(255 * Math.min(1, ib + whiteLift)),
+      intensity: Math.max(ir, ig, ib)
+    };
   }
 
   function updateLoadsFromFingers(){
@@ -383,13 +396,12 @@ button:disabled{opacity:.55;cursor:not-allowed}
           img.data[k]=v; img.data[k+1]=v; img.data[k+2]=v;
           img.data[k+3]=225;
         } else {
-          const tone = rainbowTone(phase*1.55, fringe);
-          let shade = 0.88 + 0.20*fringe;
-          shade *= (1 - dent*0.08);
-          img.data[k]=clamp(tone.rgb[0]*shade,0,255);
-          img.data[k+1]=clamp(tone.rgb[1]*shade,0,255);
-          img.data[k+2]=clamp(tone.rgb[2]*shade,0,255);
-          img.data[k+3]=tone.alpha;
+          const pe = photoelasticRGB(s);
+          const opacity = Number(overlayOpacityEl.value);
+          img.data[k]   = pe.r;
+          img.data[k+1] = pe.g;
+          img.data[k+2] = pe.b;
+          img.data[k+3] = Math.round(255 * opacity * Math.pow(pe.intensity, 0.72));
         }
       }
     }
@@ -544,6 +556,14 @@ button:disabled{opacity:.55;cursor:not-allowed}
   frameScaleEl.addEventListener('input', () => {
     statusEl.innerHTML = `<strong>設定更新:</strong> 正方形サイズを ${(Number(frameScaleEl.value)*100).toFixed(0)} % に変更しました。`;
   });
+
+
+  function updateOpacityReadout(){
+    if(overlayOpacityReadout){
+      overlayOpacityReadout.textContent = `現在: ${Math.round(Number(overlayOpacityEl.value)*100)}%`;
+    }
+  }
+  overlayOpacityEl.addEventListener('input', updateOpacityReadout);
 
   startCamBtn.addEventListener('click', startCamera);
   resetBtn.addEventListener('click', resetAll);
